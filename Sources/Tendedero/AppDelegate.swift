@@ -8,6 +8,7 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let line = Line()
     private var panel: LinePanel!
+    private let preview = Preview()
     private var statusItem: NSStatusItem!
     private var watcher: ScreenshotWatcher!
     /// In inbox mode, a second watcher on the Desktop. If a macOS version
@@ -16,6 +17,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var safetyWatcher: ScreenshotWatcher?
     private var signalSources: [DispatchSourceSignal] = []
     private var hotKey: HotKey?
+    private var snipHotKey: HotKey?
+    /// Held only while the pointer rests on a photo: Escape then discards it,
+    /// and everywhere else Escape works as usual.
+    private var escapeKey: HotKey?
+    private var escapeTarget: UUID?
     private var cancellables = Set<AnyCancellable>()
     private var mouseTimer: Timer?
 
@@ -44,6 +50,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// The screen a new capture was taken on: the line goes there.
     private var pendingScreen: NSScreen?
 
+    /// Kept open from the menu: the line stays down, even empty, and never
+    /// tucks away by itself. The shortcut can still put it away for a while.
+    private var fixedOpen: Bool {
+        get { UserDefaults.standard.bool(forKey: "fixedOpen") }
+        set { UserDefaults.standard.set(newValue, forKey: "fixedOpen") }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         let host = NSHostingView(rootView: LineView(line: line))
         host.sizingOptions = []
@@ -57,6 +70,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         hotKey = HotKey(keyCode: kVK_ANSI_T, modifiers: controlKey | optionKey) { [weak self] in
             self?.toggle()
+        }
+        snipHotKey = HotKey(keyCode: kVK_ANSI_A, modifiers: cmdKey | shiftKey) { [weak self] in
+            self?.snip()
         }
 
         setUpStatusItem()
@@ -93,6 +109,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if !Inbox.wasOffered {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.offerInbox() }
+        }
+
+        if fixedOpen {
+            keepOpen = true
+            wanted = true
+            refresh()
         }
 
         if !UserDefaults.standard.bool(forKey: "welcomed") {
@@ -195,6 +217,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lastLiveCount = live
     }
 
+    // MARK: Tendedero's own capture
+
+    /// Cmd+Shift+A: pick an area, mark it up or record it, and it hangs on
+    /// the line. While recording, the same shortcut stops.
+    private func snip() {
+        if RecordingSession.isRecording {
+            RecordingSession.stop()
+            return
+        }
+        preview.hide()
+        SnipSession.start(
+            excluding: [panel.windowNumber, preview.windowNumber],
+            onDone: { [weak self] image, rect in self?.snipped(image, rect: rect) },
+            onRecord: { [weak self] screen, rect, audio in self?.record(on: screen, rect: rect, audio: audio) })
+    }
+
+    private func record(on screen: NSScreen, rect: CGRect, audio: Bool) {
+        setStatusIcon(recording: true)
+        RecordingSession.start(on: screen, rect: rect, audio: audio) { [weak self] file, rect in
+            guard let self else { return }
+            self.setStatusIcon(recording: false)
+            _ = SnipSession.saveRecording(file, rect: rect, in: self.watcher.folder)
+        }
+        // Starting can fail, for example without permission; the icon follows.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            if !RecordingSession.isRecording { self?.setStatusIcon(recording: false) }
+        }
+    }
+
+    private func setStatusIcon(recording: Bool) {
+        let image = NSImage(systemSymbolName: recording ? "record.circle.fill" : "tshirt",
+                            accessibilityDescription: "Tendedero")
+        image?.isTemplate = !recording
+        statusItem.button?.image = image
+        statusItem.button?.contentTintColor = recording ? .systemRed : nil
+    }
+
+    /// Copied at once, like the system's Control shortcut, and saved where
+    /// screenshots go, so the watcher hangs it and it flies from the area.
+    private func snipped(_ image: CGImage, rect: CGRect) {
+        let entry = NSPasteboardItem()
+        if let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) {
+            entry.setData(data, forType: .png)
+        }
+        let url = SnipSession.saveScreenshot(image, rect: rect, in: watcher.folder)
+        if let url { entry.setString(url.absoluteString, forType: .fileURL) }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.writeObjects([entry])
+    }
+
     // MARK: The capture flying to the line
 
     /// A new screenshot lifts off from where it was taken and flies to its
@@ -272,6 +344,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         isPresent = true
         panel.alphaValue = 1
         panel.orderFrontRegardless()
+        // Back from full screen, a line kept open comes down again.
+        if fixedOpen { reveal() }
     }
 
     private func dismiss() {
@@ -300,6 +374,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             pinned = false
             peekUntil = .distantPast
             panel.ignoresMouseEvents = true
+            preview.hide()
+            updateEscape(nil)
         }
     }
 
@@ -318,6 +394,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             updateCapacity()
             refresh()
             reveal(pinned: true)
+        }
+    }
+
+    private func setFixedOpen(_ on: Bool) {
+        fixedOpen = on
+        if on {
+            keepOpen = true
+            wanted = true
+            if !isRevealed {
+                panel.placeOnScreen()
+                updateCapacity()
+            }
+            refresh()
+            reveal()
+        } else {
+            // Back to normal: it tucks away once the pointer is elsewhere.
+            keepOpen = false
+            if line.liveCount == 0 {
+                wanted = false
+                refresh()
+            }
         }
     }
 
@@ -353,7 +450,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func watchMenuBarClicks() {
         let handler: (NSEvent?) -> Void = { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self else { return }
+                guard let self, !self.fixedOpen else { return }
                 let p = NSEvent.mouseLocation
                 guard NSScreen.screens.contains(where: { Self.menuBarBand(of: $0).contains(p) }) else { return }
                 self.menuBarSuppressed = true
@@ -406,6 +503,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         updateMousePassThrough(mouse)
+        updatePreview(mouse)
 
         // The line's zone runs from its lowest point up to the top of the
         // screen, menu bar included, so moving up never hides it.
@@ -414,7 +512,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let inside = NSMouseInRect(mouse, zone, false)
         if inside && pinned { pinned = false }
 
-        let busy = pinned || GrabView.isDragging || line.pressedID != nil || now < peekUntil
+        let busy = fixedOpen || pinned || GrabView.isDragging || line.pressedID != nil || now < peekUntil
         if inside || busy {
             awaySince = nil
         } else {
@@ -440,6 +538,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// Resting the pointer on a photo opens a large view of it below the
+    /// line. Dragging, pressing or a menu over the line puts it away.
+    private func updatePreview(_ mouse: NSPoint) {
+        guard !GrabView.isDragging, line.pressedID == nil, line.draggingID == nil else {
+            preview.hide()
+            updateEscape(nil)
+            return
+        }
+        let local = panel.convertPoint(fromScreen: mouse)
+        let flipped = CGPoint(x: local.x, y: panel.frame.height - local.y)
+        let item = line.items.first { item in
+            !item.falling && !item.flying && (line.hitRects[item.id]?.contains(flipped) ?? false)
+        }
+        preview.update(over: item, card: item.flatMap { cardFrame(for: $0.id) }, on: panel.screen)
+        // The capture veil has its own Escape: cancel, never discard.
+        updateEscape(SnipSession.isActive ? nil : item?.id)
+    }
+
+    /// Takes Escape while a photo is under the pointer, gives it back after.
+    private func updateEscape(_ id: UUID?) {
+        escapeTarget = id
+        if id == nil {
+            escapeKey = nil
+        } else if escapeKey == nil {
+            escapeKey = HotKey(keyCode: kVK_Escape, modifiers: 0) { [weak self] in
+                guard let self, let id = self.escapeTarget else { return }
+                self.line.discard(id)
+            }
+        }
+    }
+
     private func updateCapacity() {
         let usable = panel.frame.width - 200
         line.maxItems = max(3, min(12, Int(usable / Layout.spacing)))
@@ -460,6 +589,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
 
+        let recording = RecordingSession.isRecording
+        let snipItem = ClosureMenuItem(recording ? L("Stop recording", "Detener la grabación")
+                                                 : L("Capture or record…", "Capturar o grabar…")) { [weak self] in
+            // Let the menu close before the screen freezes.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self?.snip() }
+        }
+        snipItem.keyEquivalent = "a"
+        snipItem.keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(snipItem)
+        menu.addItem(.separator())
+
         let toggleItem = ClosureMenuItem(isRevealed ? L("Hide line", "Ocultar tendedero")
                                                  : L("Show line", "Mostrar tendedero")) { [weak self] in
             self?.toggle()
@@ -468,11 +608,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         toggleItem.keyEquivalentModifierMask = [.control, .option]
         menu.addItem(toggleItem)
 
+        let fixedItem = ClosureMenuItem(L("Keep line open", "Mantener el tendedero abierto")) { [weak self] in
+            guard let self else { return }
+            self.setFixedOpen(!self.fixedOpen)
+        }
+        fixedItem.state = fixedOpen ? .on : .off
+        fixedItem.toolTip = L("The line stays down instead of tucking away",
+                              "El tendedero se queda abajo en vez de esconderse")
+        menu.addItem(fixedItem)
+
         let clearItem = ClosureMenuItem(L("Take everything down", "Descolgar todo")) { [weak self] in
             self?.line.clear()
         }
         clearItem.isEnabled = line.liveCount > 0
         menu.addItem(clearItem)
+
+        let unpinItem = ClosureMenuItem(L("Close pinned screenshots", "Cerrar capturas fijadas")) {
+            PinnedShot.closeAll()
+        }
+        unpinItem.isEnabled = PinnedShot.count > 0
+        menu.addItem(unpinItem)
 
         let inbox = ClosureMenuItem(L("Handle screenshots", "Encargarse de las capturas")) { [weak self] in
             self?.setInbox(!Inbox.isEnabled)

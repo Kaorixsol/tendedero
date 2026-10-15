@@ -14,6 +14,10 @@ struct Pegged: Identifiable, Equatable {
     var falling = false
     /// Still flying in from where it was captured; the card waits hidden.
     var flying = false
+    /// For a screen recording, its length in seconds.
+    var duration: Double?
+
+    var isVideo: Bool { duration != nil }
 
     static func == (a: Pegged, b: Pegged) -> Bool {
         a.id == b.id && a.falling == b.falling && a.flying == b.flying && a.thumb === b.thumb
@@ -57,9 +61,17 @@ final class Line: ObservableObject {
 
     @discardableResult
     func hang(_ url: URL, quietly: Bool = false, flying: Bool = false) -> UUID? {
-        guard !items.contains(where: { $0.url == url && !$0.falling }),
-              let thumb = makeThumbnail(url) else { return nil }
-        var item = Pegged(url: url, thumb: thumb)
+        guard !items.contains(where: { $0.url == url && !$0.falling }) else { return nil }
+        var item: Pegged
+        if isVideo(url) {
+            guard let info = loadVideoInfo(url, maxPixels: 480) else { return nil }
+            item = Pegged(url: url, thumb: NSImage(cgImage: info.frame,
+                                                   size: NSSize(width: info.frame.width, height: info.frame.height)))
+            item.duration = info.duration
+        } else {
+            guard let thumb = makeThumbnail(url) else { return nil }
+            item = Pegged(url: url, thumb: thumb)
+        }
         item.flying = flying
         items.append(item)
         // A full line lets the oldest photo fall off the far end.
@@ -203,6 +215,13 @@ final class Line: ObservableObject {
         items[i].thumb = thumb
     }
 
+    /// Option-drag off the line, or the menu: the photo floats on the screen
+    /// where it was dropped, and stays on the line too.
+    func pin(_ id: UUID, at point: NSPoint? = nil) {
+        guard let item = items.first(where: { $0.id == id && !$0.falling }) else { return }
+        PinnedShot.pin(item.url, thumb: item.thumb, at: point)
+    }
+
     func reveal(_ id: UUID) {
         guard let item = items.first(where: { $0.id == id }) else { return }
         NSWorkspace.shared.activateFileViewerSelecting([item.url])
@@ -251,6 +270,10 @@ final class Line: ObservableObject {
 }
 
 func makeThumbnail(_ url: URL, maxPixels: Int = 480) -> NSImage? {
+    if isVideo(url) {
+        guard let frame = loadVideoInfo(url, maxPixels: maxPixels)?.frame else { return nil }
+        return NSImage(cgImage: frame, size: NSSize(width: frame.width, height: frame.height))
+    }
     guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
     let options: [CFString: Any] = [
         kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -259,4 +282,14 @@ func makeThumbnail(_ url: URL, maxPixels: Int = 480) -> NSImage? {
     ]
     guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
     return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+}
+
+/// The image's size in pixels, read from its header without decoding it.
+func imagePixelSize(of url: URL) -> CGSize? {
+    if isVideo(url) { return loadVideoInfo(url, maxPixels: 16)?.pixelSize }
+    guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+          let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+          let w = props[kCGImagePropertyPixelWidth] as? Int,
+          let h = props[kCGImagePropertyPixelHeight] as? Int, w > 0, h > 0 else { return nil }
+    return CGSize(width: w, height: h)
 }

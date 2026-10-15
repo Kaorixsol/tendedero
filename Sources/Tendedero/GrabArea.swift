@@ -40,12 +40,16 @@ struct GrabArea: NSViewRepresentable {
         view.onTrash = { line.trash(id) }
         view.onDiscard = { line.discard(id) }
         view.onLongPress = { line.markup(id) }
+        view.onPin = { point in line.pin(id, at: point) }
         view.onPressChange = { pressed in line.pressedID = pressed ? id : nil }
         view.menuProvider = {
             let menu = NSMenu()
             menu.addItem(ClosureMenuItem(L("Copy", "Copiar")) { line.copy(id) })
             menu.addItem(ClosureMenuItem(L("Open", "Abrir")) { line.open(id) })
-            menu.addItem(ClosureMenuItem(L("Markup", "Marcación")) { line.markup(id) })
+            if !item.isVideo {
+                menu.addItem(ClosureMenuItem(L("Markup", "Marcación")) { line.markup(id) })
+            }
+            menu.addItem(ClosureMenuItem(L("Pin to screen", "Fijar en la pantalla")) { line.pin(id) })
             menu.addItem(ClosureMenuItem(L("Show in Finder", "Mostrar en Finder")) { line.reveal(id) })
             let inInbox = line.isInInbox(id)
             if inInbox {
@@ -76,6 +80,7 @@ final class GrabView: NSView, NSDraggingSource {
     var onDiscard: () -> Void = {}
     var onLongPress: () -> Void = {}
     var onPressChange: (Bool) -> Void = { _ in }
+    var onPin: (NSPoint) -> Void = { _ in }
     var menuProvider: () -> NSMenu = { NSMenu() }
 
     private var downPoint: NSPoint?
@@ -161,11 +166,22 @@ final class GrabView: NSView, NSDraggingSource {
 
     // MARK: NSDraggingSource
 
+    /// Holding Option, at any point of the drag, pins the photo where it is
+    /// dropped instead of handing the file to whatever is underneath.
+    private static var pinning: Bool { NSEvent.modifierFlags.contains(.option) }
+
     func draggingSession(_ session: NSDraggingSession,
                          sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        // Pinning: nothing may take it, not even Finder.
+        if Self.pinning { return [] }
         // Apps pick copy. Finder picks move, so a folder or the Desktop keeps
         // the file. Delete is what lets the Dock's Trash accept it.
-        context == .outsideApplication ? [.copy, .move, .delete] : []
+        return context == .outsideApplication ? [.copy, .move, .delete] : []
+    }
+
+    func draggingSession(_ session: NSDraggingSession, movedTo screenPoint: NSPoint) {
+        // A photo about to be pinned stays where it is let go.
+        session.animatesToStartingPositionsOnCancelOrFail = !Self.pinning
     }
 
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
@@ -173,6 +189,11 @@ final class GrabView: NSView, NSDraggingSource {
         startedDrag = false
         downPoint = nil
         log.notice("Drag ended with operation \(operation.rawValue, privacy: .public)")
+        if operation.isEmpty && Self.pinning {
+            onDragEnd()
+            onPin(screenPoint)
+            return
+        }
         // Dropped on the Trash: macOS only tells us, we move the file.
         if operation.contains(.delete) {
             onDragEnd()

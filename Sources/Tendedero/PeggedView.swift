@@ -65,6 +65,7 @@ struct PeggedView: View {
                 RoundedRectangle(cornerRadius: Frame.radius - Frame.inset, style: .continuous)
                     .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.5)
             )
+            .overlay { if let duration = item.duration { VideoBadge(duration: duration) } }
             .padding(Frame.inset)
             .glassFrame(cornerRadius: Frame.radius)
             .shadow(color: .black.opacity(hovering ? 0.26 : 0.18), radius: hovering ? 14 : 10, y: hovering ? 8 : 5)
@@ -137,6 +138,31 @@ struct PeggedView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             withAnimation(.interpolatingSpring(stiffness: 38, damping: 2.4)) { swing = 0 }
         }
+    }
+}
+
+/// A screen recording on the line: a play mark in the middle and its length
+/// in the corner.
+private struct VideoBadge: View {
+    let duration: Double
+
+    var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            Image(systemName: "play.fill")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 30, height: 30)
+                .background(Circle().fill(Color.black.opacity(0.45)))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Text(formatDuration(duration))
+                .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                .foregroundStyle(.white)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color.black.opacity(0.55)))
+                .padding(4)
+        }
+        .allowsHitTesting(false)
     }
 }
 

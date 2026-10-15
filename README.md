@@ -43,10 +43,13 @@ Rest the pointer in the menu bar and it glides down. Move away and it's gone.
 | Double click | Open it in Preview. |
 | Drag into an app | Send a copy. It stays on the line. |
 | Drag into a folder | Keep it there. It leaves the line. |
-| Drag to the Trash, or click the cross | Let it go. |
+| Hold <kbd>⌥</kbd> and drag anywhere | Pin it on the screen. Scroll to zoom, the cross closes it. |
+| Rest the pointer on it | See it large, just below the line. |
+| Drag to the Trash, click the cross, or point at it and press <kbd>esc</kbd> | Let it go. |
 | Rest the pointer in the menu bar | Bring the line down on that screen. |
 | Click anything in the menu bar | Put it away. |
 | <kbd>⌃</kbd>&thinsp;<kbd>⌥</kbd>&thinsp;<kbd>T</kbd> | Show or hide the line. |
+| <kbd>⌘</kbd>&thinsp;<kbd>⇧</kbd>&thinsp;<kbd>A</kbd> | Capture an area: click a window or drag, adjust it, mark it up. Switch to Record at the top to record it; press again to stop. |
 
 <br>
 

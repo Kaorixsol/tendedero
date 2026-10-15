@@ -14,7 +14,9 @@ final class ScreenshotWatcher {
     private let onNew: (URL) -> Void
     private let onChange: () -> Void
 
-    private static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "heic", "tif", "tiff", "gif", "webp"]
+    /// Images, and screen recordings.
+    private static let imageExtensions = Set(["png", "jpg", "jpeg", "heic", "tif", "tiff", "gif", "webp"])
+        .union(videoExtensions)
 
     static let desktop = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop")
 
